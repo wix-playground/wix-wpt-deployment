@@ -1,0 +1,184 @@
+---
+
+- set_fact:
+    ansible_port: 41278
+- block:
+    - name: "Verify /usr/bin/python on remote"
+      shell: "which python > /dev/null"
+      register: check
+      failed_when: check.rc != 0
+      no_log: True
+  rescue:
+    - name: Set python interpeter as /usr/bin/python3
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Install needed packages
+  become: yes
+  apt:
+    name: ['alsa-utils',
+           'dbus-x11',
+           'jackd2',
+           'pulseaudio',
+           'upower',
+           'watchdog']
+
+- name: Set python interpeter as /usr/bin/python
+  set_fact:
+    ansible_python_interpreter: /usr/bin/python
+
+- name: Set hostname
+  become: yes
+  replace:
+    path: /etc/hostname
+    regexp: '^ip.*$'
+    replace: "{{ wpt_agent }}"
+
+- name: Register {{ wpt_server }} in /etc/hosts
+  become: yes
+  lineinfile:
+    path: /etc/hosts
+    line: "10.42.60.213 {{ wpt_server }}"
+    insertbefore: EOF
+    state: present
+
+- block:
+    - name: Git clone wptagent repo
+      become: yes
+      become_user: wpt
+      git:
+        repo: 'https://github.com/WPO-Foundation/wptagent.git'
+        dest: /opt/wpt/wptagent
+        clone: yes
+        force: yes
+  rescue:
+    - name: Git pull changes from wptagent repo
+      become: yes
+      become_user: wpt
+      git: 
+        repo: 'https://github.com/WPO-Foundation/wptagent.git'
+        dest: /opt/wpt/wptagent
+        clone: no
+
+- name: Install wptagent
+  become: yes
+  become_user: wpt
+  shell: /opt/wpt/wptagent/ubuntu_install.sh
+  async: 1800
+  poll: 0
+  register: result
+
+- name: Install progress ...
+  become: yes
+  become_user: wpt
+  async_status:
+    jid: "{{ result.ansible_job_id }}"
+  register: tracker
+  until: tracker.finished
+  retries: 180
+
+- name: Minimize the space for systemd journal
+  become: yes
+  lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: 'SystemMaxUse='
+    line: 'SystemMaxUse=1M'
+
+- name: Restart systemd journal
+  become: yes
+  service:
+    name: systemd-journald
+    state: restarted
+
+- name: Set Reboot when out of memory
+  become: yes
+  lineinfile:
+    path: /etc/sysctl.conf 
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  with_items:
+    - { regexp: 'vm.panic_on_oom=', line:  'vm.panic_on_oom=1' }
+    - { regexp: 'kernel.panic=', line: 'kernel.panic=10'}
+
+- name: Disable IPv6
+  become: yes
+  lineinfile:
+    path: /etc/sysctl.conf 
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  with_items:
+    - { regexp: 'net.ipv6.conf.all.disable_ipv6 = ', line: 'net.ipv6.conf.all.disable_ipv6 = 1' }
+    - { regexp: 'net.ipv6.conf.default.disable_ipv6 = ', line: 'net.ipv6.conf.default.disable_ipv6 = 1' }
+    - { regexp: 'net.ipv6.conf.lo.disable_ipv6 = ', line: 'net.ipv6.conf.lo.disable_ipv6 = 1' }
+
+- name: Configure watchdog
+  become: yes
+  lineinfile:
+    path: /etc/watchdog.conf
+    line: "{{ item }}"
+    insertbefore: EOF
+    state: present
+  with_items:
+    - "# Check if wptagent alive"
+    - "test-binary = /opt/wpt/wptagent/alive.sh"
+
+- name: Generate wptagent service
+  become: yes
+  template:
+    src: "{{ wd }}/templates/wptagent.service.j2"
+    dest: /lib/systemd/system/wptagent.service
+    owner: root
+    group: root
+    mode: 0644
+
+- name: Enable wptagent service
+  become: yes
+  service:
+    name: wptagent
+    enabled: yes
+    state: started
+
+- name: Set update wptagent repo
+  become: yes
+  copy:
+    src: "{{ wd }}/files/agents/update_wptagent.sh"
+    dest: /opt/wpt/update_wptagent.sh
+    owner: wpt
+    group: wpt
+    mode: 0744
+
+- name: Set crontab for update wptagent repo
+  become: yes
+  become_user: wpt
+  cron:
+    name: "update wptagent repo"
+    minute: "0"
+    hour: "0"
+    job: "/opt/wpt/update_wptagent.sh /opt/wpt/wptagent > /dev/null"
+
+- name: "Generate {{ wpt_agent }} params into local location.ini"
+  local_action: "shell {{ wd }}/scripts/locations.py -agent {{ wpt_agent }} -location {{ location }} -cloud {{ cloud }} -zone {{ zone }} -hidden {{ hide_agent }} -inifile {{ wd }}/files/master/locations.ini"
+  when: create_cluster == "1"
+
+- block:
+    - name: Update wptmaster locations.ini with {{ wpt_agent }} params
+      become: yes
+      delegate_to: "{{ wpt_server }}"
+      copy:
+        src: "{{ wd }}/files/master/locations.ini"
+        dest: /var/www/webpagetest/www/settings/locations.ini
+        owner: www-data
+        group: www-data
+        mode: 0644
+
+    - name: Restart wptmaster {{ wpt_server }} nginx service
+      delegate_to: "{{ wpt_server }}"
+      become: yes
+      service:
+        name: nginx
+        state: restarted
+  when: create_cluster == "1"
+
+- name: Reboot machine
+  become: yes
+  shell: shitdown -r now

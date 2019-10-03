@@ -1,0 +1,2 @@
+#WebPageTest user agent sudoers
+wpt	ALL=(ALL:ALL) NOPASSWD:ALL

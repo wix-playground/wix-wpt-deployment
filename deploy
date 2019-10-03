@@ -1,0 +1,281 @@
+#! /bin/bash
+
+WPT_SERVER="sys-wpt-master0a.42.wixprod.net"
+PLAYBOOK_VARS="wd=$(pwd) wpt_server=$WPT_SERVER"
+
+usage() {
+
+	echo
+	echo "$0 [ --bootstrap ] | [ --master ] | [ --agent [ --cluster | --join ] [--instance-group | --location --cloud --zone ] | [ --hidden ]] | [ --debug ] | [ --help ]"
+	echo
+	echo "Options:"
+	echo 
+	echo "  --bootstrap       run main playbook to bootstrap host"
+	echo "  --master          run master playbook"
+	echo "  --agent           run agent playbook"
+	echo "  --cluster         create cluster location"
+	echo "  --join            join agent to an existing cluster location (i.e multiple agents per location)"	
+	echo "  --instance-group  detect agent location, region and zone based on instance metadata"
+	echo "  --location        set agent geo location (i.e. city name)"
+	echo "  --cloud           set cloud name (i.e AWS, GCE..)"
+	echo "  --zone            set zone name (i.e us-east-1, us-central-1..)"
+	echo "  --hidden          hide agent from the drop down location list in UI"
+	echo "  --debug           run in verbose mode"
+	echo "  --help            help"
+	echo
+
+	echo "examples:"
+	echo "---------"
+	echo "1. Create cluster:"
+	echo " $0 --bootstrap --agent --cluster --location Sao-Paulo --cloud GCE --zone sa-east-1 --hidden"
+	echo
+	echo "2. Join to cluster:"
+	echo " $0 --bootstrap --agent --join --location Sao-Paulo --cloud GCE --zone sa-east-1 --hidden"
+	echo
+	echo "3. install and join agent to google instance group (joint to cluster)"
+	echo " $0 --bootstarp --agent --instance-group --join"
+	exit 0
+
+}
+
+getZone() {
+
+    response=$(curl -sSf "http://metadata.google.internal/computeMetadata/v1/instance/?recursive=true" -H "Metadata-Flavor: Google" 2>&1)
+
+    if [[ $response =~ curl: ]]
+      then
+      		echo "You can't run --instance-group on your local machine"
+      		exit 1
+      else
+      		echo $response | python -c "import sys,json; print(json.load(sys.stdin)['zone'])" | rev | cut -d '/' -f1 | rev | cut -d '-' -f-2
+    fi
+}
+
+getLocation() {
+
+    local zone="$1"
+
+    echo $(cat files/agents/gcloud_locations.map | grep "$zone" | awk -F ', ' '{print $2}')
+}
+
+getAgentId() {
+
+	local location="$1"
+	local id=""
+
+	for word in $(echo $location | tr [=-=] " ")
+	  do
+		id+=$(echo $word | head -c 1)
+	done
+	
+	if [ $(echo -n $id | wc -c) -eq 1 ]
+	  then
+		id+=$(echo $location | head -c 2 | tail -c 1)
+	fi
+
+	echo $id | tr [:upper:] [:lower:]
+}
+
+isLocationExist() {
+
+	local location="$1"
+	local exist=0
+
+    if [ $instance_group -eq 0 ]
+      then
+      		grep -q -w '\['$location'\]' files/master/locations.ini
+      else
+      		response=$(curl -sSf 'http://'$WPT_SERVER'/getLocations.php?f=json&hidden' -H 'Content-type: application/json' 2>&1)
+
+      		if [[ $response =~ curl: ]]
+      		  then
+      		  		echo "Couldn't determain location params from wpt master server on [ $WPT_SERVER ]"
+      		  		exit 1
+      		  else
+      		  		echo $response | grep -q -w "$location"
+      		fi
+    fi
+
+	case $? in
+		0) exist=1
+		;;
+
+		1) exist=0
+		;;
+	esac
+
+	echo $exist
+}
+
+
+getClustersList() {
+
+	grep -w '\['.*_Cluster'\]' files/master/locations.ini | grep -v $location | tr -d '[]' | cut -d '_' -f1
+}
+
+if [ $# -gt 0 ]
+  then
+  	if [[ ! $@ =~ --cluster ]]
+  	  then
+			create_cluster=0
+	  else
+	  		create_cluster=1
+	  		join_cluster=0
+  	fi
+
+  	if [[ ! $@ =~ --join ]]
+  	  then
+			join_cluster=0
+	  else
+	  		join_cluster=1
+	  		create_cluster=0
+  	fi
+
+  	if [[ ! $@ =~ --hidden ]]
+  	  then
+			hide_agent=0
+	  else
+	  		hide_agent=1
+  	fi
+
+    if [[ ! $@ =~ --instance-group ]]
+      then
+            instance_group=0
+      else
+            create_cluster=0
+            join_cluster=1
+            instance_group=1
+            zone=$(getZone)
+            location=$(getLocation $zone)
+            cloud="GCE"
+            connection="--connection=local"
+    fi
+
+	while [ $# -gt 0 ]
+	  do
+		case $1 in
+
+			--bootstrap)
+				hosts_group=$(echo "$hosts_group,bootstrap" | sed 's/^,//')
+				PLAYBOOK_VARS="$PLAYBOOK_VARS"
+			;;
+
+			--master)
+				hosts_group=$(echo "$hosts_group,master" | sed 's/^,//')
+				PLAYBOOK_VARS="$PLAYBOOK_VARS"
+				break
+			;;
+
+			--agent)
+				hosts_group=$(echo "$hosts_group,agents" | sed 's/^,//')
+				PLAYBOOK_VARS="$PLAYBOOK_VARS"
+			;;
+
+			--cluster)
+			;;
+
+			--join)
+			;;
+
+			--instance-group)
+            ;;
+
+			--location)
+				shift
+				location=$1
+			;;
+
+			--cloud)
+				shift
+				cloud=$(echo $1 | tr [:lower:] [:upper:])
+			;;
+
+			--zone)
+				shift
+				zone=$(echo $1 | tr [:upper:] [:lower:])
+			;;
+
+			--hidden)
+				shift
+			;;
+
+			--debug)
+				debug="-vvv"
+			;;
+
+			--help)
+				usage
+			;;
+
+			*) echo "Wrong command-line option ..."
+			   exit 1
+		esac
+
+		shift
+	done
+
+	wpt_agent=wpt-agent-$(getAgentId $location)
+
+	if [ $instance_group -eq 0 ]
+	  then
+			if [ $create_cluster -eq 1 ] || [ $join_cluster -eq 1 ]
+			  then
+			  		location="${location}_Cluster"
+			  		wpt_agent="${wpt_agent}-c"
+			fi
+	fi
+
+	if [ $instance_group -eq 0 ]
+      then
+
+			location_exist=$(isLocationExist $location)
+
+			if [ $location_exist -eq 1 ] && [ $join_cluster -eq 0 ]
+			  then
+			  		echo "Error - location [$location] already exist in the system."
+
+			  		if [[ ! $location =~ Cluster ]]
+			  		  then
+							echo "Please choose another location name."
+					  else
+					  		echo "Use --join to join the new agent into cluster [$location]."
+					fi
+
+			  		exit 1
+			fi
+
+			if [ $location_exist -eq 0 ] && [ $join_cluster -eq 1 ]
+			  then
+			  		echo "Error - location [$location] doesn't exist yet, so you can't join new agent into it."
+					echo "1. deploy an agent at location [$location] with --cluster, to create a cluster location."
+					echo "2. deploy an agent at location [$location] with --join to join the agent to this cluster."
+					exit 1
+			fi
+
+			if [ $location_exist -eq 1 ] && [ $join_cluster -eq 1 ] && [[ ! $location =~ Cluster ]]
+			  then
+			  		echo "Error - You tried to join an agent to location that is not a cluster location"
+
+			  		list=$(getClustersList)
+
+			  		if [ -s "$list" ]
+			  		  then
+			  				echo "Available clusters are:"
+			  				echo "$list"
+			  				echo
+			  				echo "Please choose one of the cluster on the list and try again"
+			  		  else
+			  		  		echo "You need first to create a cluster location at [$location] using --cluster and then try again"
+			  		fi
+
+			  		exit 1
+			fi
+	fi
+
+	PLAYBOOK_VARS="$PLAYBOOK_VARS wpt_agent=$wpt_agent instance_group=$instance_group create_cluster=$create_cluster join_cluster=$join_cluster location=$location cloud=$cloud zone=$zone hide_agent=$hide_agent hosts_group=$hosts_group"
+else
+	usage
+fi
+	
+ansible-playbook main.yaml -e "$PLAYBOOK_VARS" $connection -i hosts --tags $hosts_group $debug
+#echo "ansible-playbook main.yaml -e "$PLAYBOOK_VARS" $connection -i hosts --tags $hosts_group $debug"

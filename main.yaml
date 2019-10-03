@@ -1,0 +1,22 @@
+---
+
+- hosts: "{{ 'master' if 'agents' not in hosts_group else 'agents' }}"
+  gather_facts: no
+  tasks:
+    - import_tasks: "{{ wd }}/bootstrap.yaml"
+      tags:
+        - bootstrap
+
+- hosts: master
+  gather_facts: no
+  tasks:
+    - import_tasks: "{{ wd }}/master/master.yaml"
+      tags:
+        - master
+
+- hosts: agents
+  gather_facts: no
+  tasks:
+    - import_tasks: "{{ wd }}/agents/agents.yaml"
+      tags:
+        - agents

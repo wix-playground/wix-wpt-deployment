@@ -1,0 +1,135 @@
+---
+
+- set_fact:
+    ansible_port: 22
+    ansible_ssh_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/ci-builder.id_rsa
+
+- block:
+  - name: "Verify /usr/bin/python on remote"
+    shell: "which python > /dev/null"
+    register: check
+    failed_when: check.rc != 0
+    no_log: True
+  rescue:
+    - name: Set python interpeter as /usr/bin/python3
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Remove repo(s) from source list
+  become: yes
+  apt_repository:
+    repo: ppa:ubuntu-mozilla-daily/ppa
+    state: absent
+
+- name: Update packages
+  become: yes
+  apt:
+    update_cache: yes
+
+- name: Install packages
+  become: yes
+  apt:
+    name: ['ansible',
+           'aptitude',
+           'dialog',
+           'dnsutils',
+           'git',
+           'iputils-ping',
+           'python2.7',   
+           'python-pip',
+           'telnet',
+           'vim',
+           'whiptail',
+           'zip']
+    update_cache: yes
+    cache_valid_time: 86400
+
+- name: Upgrade to latest
+  become: yes
+  apt:
+    upgrade: yes
+
+- name: Create wpt user
+  become: yes
+  user:
+    name: wpt
+    state: present
+    shell: /bin/bash
+    createhome: yes
+    home: /opt/wpt
+    comment: WebPageTest user
+
+- name: Create wpt sudoers file
+  become: yes
+  copy:
+    src: "{{ wd }}/files/agents/wpt_sudoers"
+    dest: /etc/sudoers.d/
+    owner: root
+    group: root
+    mode: 0440
+
+- name: Update users from chef databag
+  local_action: "shell knife download /data_bags/users --force"
+
+- name: Create sysadmin group
+  become: yes
+  group:
+    name: sysadmin
+    state: present
+
+- name: Create cansudo file in /etc/sudoers.d/
+  become: yes
+  copy:
+    src: "{{ wd }}/files/cansudo"
+    dest: /etc/sudoers.d/cansudo
+    owner: root
+    group: root
+    mode: 0440
+
+- name: Generate sysadmin users list
+  local_action: "shell python3 {{ wd }}/scripts/generateusers.py"
+
+- name: Upload updateusers script and data to remote
+  become: yes
+  copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+  with_items:
+    - { src: "{{ wd }}/scripts/updateusers.py", dest: /tmp/updateusers.py}
+    - { src: /tmp/sysadmin.json , dest: /tmp/sysadmin.json}
+
+- name: Update sysadmin users
+  become: yes
+  shell: python3 /tmp/updateusers.py
+
+- name: Cleanup updateusers script and data from remote
+  become: yes
+  file:
+    path: "{{ item }}"
+    state: absent
+  with_items:
+    - /tmp/updateusers.py
+    - /tmp/sysadmin.json
+
+- name: Set sshd listening port
+  become: yes
+  replace:
+    path: /etc/ssh/sshd_config
+    regexp: '^.*(Port)\s.*$'
+    replace: '\1 41278'
+
+- name: Set /etc/motd file
+  become: yes
+  copy:
+    src: "{{ wd }}/files/bootstrap/motd"
+    dest: "/etc/motd"
+    owner: root
+    group: root
+    mode: 0644
+
+- name: Restart sshd service
+  become: yes
+  service:
+    name: sshd
+    state: restarted

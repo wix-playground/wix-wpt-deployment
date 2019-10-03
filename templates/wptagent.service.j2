@@ -1,0 +1,12 @@
+[Unit]
+Description=WebPageTest agent
+
+[Service]
+User=wpt
+Group=wpt
+ExecStart=/usr/bin/python /opt/wpt/wptagent/wptagent.py --server http://{{ wpt_server }}/work/ --location {{ wpt_agent }} --xvfb --alive /tmp/wptagent
+Restart=always
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target

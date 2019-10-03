@@ -1,0 +1,243 @@
+---
+
+- set_fact:
+    ansible_port: 41278
+- block:
+    - name: "Verify /usr/bin/python on remote"
+      shell: "which python > /dev/null"
+      register: check
+      failed_when: check.rc != 0
+      no_log: True            
+  rescue:
+    - name: Set python interpeter as /usr/bin/python3
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3
+
+- name: Install needed packages
+  become: yes
+  apt:
+    name: ['beanstalkd',
+           'build-essential',
+           'ffmpeg',
+           'imagemagick',
+           'libimage-exiftool-perl',
+           'libjpeg-turbo-progs',
+           'logrotate',
+           'nginx',
+           'php-apcu',
+           'php-cli',
+           'php-curl',
+           'php-fpm',
+           'php-gd',
+           'php-mbstring',
+           'php-sqlite3',
+           'php-xml',
+           'php-zip',
+           'python-dev',
+           'python-numpy',
+           'python-scipy',
+           'python-setuptools']
+
+- name: Set python interpeter as /usr/bin/python
+  set_fact:
+    ansible_python_interpreter: /usr/bin/python
+
+- name: Python pip install packages
+  become: yes
+  pip:
+    name: ['monotonic',
+           'pillow',
+           'pyssim',
+           'ujson']
+
+- name: Set hostname
+  become: yes
+  replace:
+    path: /etc/hostname
+    regexp: '^ip.*$'
+    replace: 'sys-wpt-master0a'
+
+- name: Updating /etc/nginx/nginx.conf
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/nginx.conf"
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: 0644
+
+- name: Updating /etc/nginx/sites-available/default
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/default"
+    dest: /etc/nginx/sites-available/default
+    owner: root
+    group: root
+    mode: 0644
+
+- name: Update php.ini
+  become: yes
+  replace:
+    path: /etc/php/7.2/fpm/php.ini
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.replace }}"
+  with_items:
+    - { regexp: '^(upload_max_filesize\s[=]).*$', replace: '\1 100M' }
+    - { regexp: '^(post_max_size\s[=]).*$', replace: '\1 100M' }
+    - { regexp: '^(memory_limit\s[=]).*$', replace: '\1 -1' }
+
+- block:
+  - name: Git clone webpagetest repo
+    become: yes
+    shell: cd /var/www/ && git clone https://github.com/WPO-Foundation/webpagetest.git && echo 'Cloned'
+    register: git_clone
+    changed_when: "'Cloned' in git_clone.stdout"
+    failed_when: "'Cloned' not in git_clone.stdout"
+  rescue:
+    - name: Git pull changes from webpagetest repo
+      become: yes
+      shell: cd /var/www/webpagetest && git pull && echo 'Pulled'
+      register: git_pull
+      changed_when: "'Pulled' in git_pull.stdout"
+      failed_when: "'Pulled' not in git_pull.stdout"
+
+- name: Update webpagetest ini files
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/{{ item }}"
+    dest: /var/www/webpagetest/www/settings/{{ item }}
+    owner: root
+    group: root
+    mode: 0644
+  with_items:
+    - connectivity.ini
+    - keys.ini
+    - locations.ini
+    - settings.ini
+
+- name: Set ownership for /var/www
+  become: yes
+  file:
+    path: /var/www
+    owner: www-data
+    group: www-data
+    recurse: yes
+
+- name: Set and mount /var/www/webpagetest/www/tmp
+  become: yes
+  mount:
+    path: /var/www/webpagetest/www/tmp
+    src: tmpfs
+    fstype: tmpfs
+    opts: noatime,mode=1777
+    state: mounted
+
+- name: Running nginx syntax check
+  become: yes
+  command: nginx -t
+  changed_when: false
+
+- name: Restart webpagetest services
+  become: yes
+  service: 
+    name: "{{ item }}"
+    state: restarted
+  with_items:
+    - php7.2-fpm
+    - nginx
+
+- block:
+  - name: Git clone wix-wpt repo
+    become: yes
+    become_user: wpt
+    shell: cd ~/ && git clone git@github.com:wix-system/wix-wpt.git && echo 'Cloned'
+    register: git_clone
+    changed_when: "'Cloned' in git_clone.stdout"
+    failed_when: "'Cloned' not in git_clone.stdout"
+  rescue:
+    - name: Git pull changes from wix-wpt repo
+      become: yes
+      become_user: wpt
+      shell: cd ~/wix-wpt && git pull && echo 'Pulled'
+      register: git_pull
+      changed_when: "'Pulled' in git_pull.stdout"
+      failed_when: "'Pulled' not in git_pull.stdout"
+
+- name: Set local wix-wpt repo updates
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/update_wix-wpt.sh"
+    dest: /opt/wpt/update_wix-wpt.sh
+    owner: wpt
+    group: wpt
+    mode: 0744
+
+- name: Set crontab for update local wix-wpt repo
+  become: yes
+  cron:
+    name: "update local wix-wpt repo"
+    minute: "*"
+    hour: "*"
+    job: "/opt/wpt/update_wix-wpt.sh > /dev/null"
+
+- name: Set agent works cleanup
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/queues_cleanup.sh"
+    dest: /opt/wpt/queues_cleanup.sh
+    owner: wpt
+    group: wpt
+    mode: 0744
+
+- name: Set crontab for agent works cleanup
+  become: yes
+  cron:
+    name: "agent works cleanup"
+    minute: "*/15"
+    hour: "*"
+    job: "/opt/wpt/queues_cleanup.sh > /dev/null"
+
+- name: Set kill old wix-wpt process
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/kill_proc.sh"
+    dest: /opt/wpt/kill_proc.sh
+    owner: wpt
+    group: wpt
+    mode: 0744
+
+- name: Set crontab for kill old wix-wpt process
+  become: yes
+  cron:
+    name: "kill old wix-wpt process"
+    minute: "*/15"
+    hour: "*"
+    job: "/opt/wpt/kill_proc.sh > /dev/null"
+
+- name: Set master results cleanup
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/results_cleanup.sh"
+    dest: /opt/wpt/results_cleanup.sh
+    owner: wpt
+    group: wpt
+    mode: 0744
+
+- name: Set crontab for results cleanup
+  become: yes
+  cron:
+    name: "results cleanup"
+    minute: "0"
+    hour: "0"
+    job: "/opt/wpt/results_cleanup.sh > /dev/null"
+
+- name: Upload wix-wpt logrotate conf file
+  become: yes
+  copy:
+    src: "{{ wd }}/files/master/wix-wpt.logrotate"
+    dest: /etc/logrotate.d/wix-wpt
+    mode: 0644
+
+- name: Reboot machine
+  become: yes
+  shell: shutdown -r now

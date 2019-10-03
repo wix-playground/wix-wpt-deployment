@@ -1,0 +1,9 @@
+/var/log/wix-wpt/*.log {
+	daily
+	missingok
+	rotate 7
+	compress
+	delaycompress
+	notifempty
+	create 0640 wpt wpt
+}

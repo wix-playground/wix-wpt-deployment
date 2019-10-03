@@ -1,0 +1,6 @@
+# Members of the group 'sysadmin' may gain root privileges
+%sysadmin ALL=(ALL) NOPASSWD:ALL
+# Members of the group 'wheel' may gain root privileges
+%wheel ALL=(ALL) NOPASSWD:ALL
+# Members of the group 'sudo' may gain root privileges
+%sudo ALL=(ALL) NOPASSWD:ALL
