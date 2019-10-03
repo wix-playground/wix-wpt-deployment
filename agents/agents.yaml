@@ -178,7 +178,3 @@
         name: nginx
         state: restarted
   when: create_cluster == "1"
-
-- name: Reboot machine
-  become: yes
-  shell: shitdown -r now
